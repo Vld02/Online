@@ -124,27 +124,117 @@ function updateValuesOnlyCopy_(spreadsheet, sourceSheet) {
     return;
   }
 
-  const existingCopy = spreadsheet.getSheetByName(copyName);
+  let valuesOnlyCopy = spreadsheet.getSheetByName(copyName);
+  const sourceIndex = sourceSheet.getIndex();
 
-  if (existingCopy) {
-    spreadsheet.deleteSheet(existingCopy);
+  if (!valuesOnlyCopy) {
+    valuesOnlyCopy = sourceSheet.copyTo(spreadsheet).setName(copyName);
+    valuesOnlyCopy.showSheet();
+    spreadsheet.setActiveSheet(valuesOnlyCopy);
+    spreadsheet.moveActiveSheet(sourceIndex + 1);
+    Logger.log(`Копия листа "${sourceName}" создана как "${copyName}".`);
+  } else {
+    updateExistingValuesOnlyCopy_(sourceSheet, valuesOnlyCopy);
+    valuesOnlyCopy.showSheet();
+    Logger.log(`Существующая копия листа "${sourceName}" обновлена как "${copyName}".`);
   }
 
-  const valuesOnlyCopy = sourceSheet.copyTo(spreadsheet).setName(copyName);
-  spreadsheet.setActiveSheet(valuesOnlyCopy);
-  spreadsheet.moveActiveSheet(sourceSheet.getIndex() + 1);
+  pasteValuesOverFormulas_(sourceSheet, valuesOnlyCopy);
 
-  const maxRows = valuesOnlyCopy.getMaxRows();
-  const maxColumns = valuesOnlyCopy.getMaxColumns();
+  Logger.log(`Копия листа "${sourceName}" обновлена как "${copyName}" — оставлены только значения и форматирование.`);
+}
+
+function updateExistingValuesOnlyCopy_(sourceSheet, targetSheet) {
+  const targetFilter = targetSheet.getFilter();
+  if (targetFilter) {
+    targetFilter.remove();
+  }
+
+  resizeSheet_(targetSheet, sourceSheet.getMaxRows(), sourceSheet.getMaxColumns());
+
+  const maxRows = sourceSheet.getMaxRows();
+  const maxColumns = sourceSheet.getMaxColumns();
+  const sourceRange = sourceSheet.getRange(1, 1, maxRows, maxColumns);
+  const targetRange = targetSheet.getRange(1, 1, maxRows, maxColumns);
+
+  targetSheet.clear();
+  sourceRange.copyTo(targetRange, SpreadsheetApp.CopyPasteType.PASTE_NORMAL, false);
+  copyColumnWidths_(sourceSheet, targetSheet, maxColumns);
+  copyRowHeights_(sourceSheet, targetSheet, maxRows);
+  copySheetSettings_(sourceSheet, targetSheet);
+  copyFilter_(sourceSheet, targetSheet);
+}
+
+function pasteValuesOverFormulas_(sourceSheet, targetSheet) {
+  const maxRows = sourceSheet.getMaxRows();
+  const maxColumns = sourceSheet.getMaxColumns();
   sourceSheet
     .getRange(1, 1, maxRows, maxColumns)
     .copyTo(
-      valuesOnlyCopy.getRange(1, 1, maxRows, maxColumns),
+      targetSheet.getRange(1, 1, maxRows, maxColumns),
       SpreadsheetApp.CopyPasteType.PASTE_VALUES,
       false
     );
+}
 
-  Logger.log(`Копия листа "${sourceName}" обновлена как "${copyName}" — оставлены только значения и форматирование.`);
+function resizeSheet_(sheet, rows, columns) {
+  const currentRows = sheet.getMaxRows();
+  if (currentRows < rows) {
+    sheet.insertRowsAfter(currentRows, rows - currentRows);
+  } else if (currentRows > rows) {
+    sheet.deleteRows(rows + 1, currentRows - rows);
+  }
+
+  const currentColumns = sheet.getMaxColumns();
+  if (currentColumns < columns) {
+    sheet.insertColumnsAfter(currentColumns, columns - currentColumns);
+  } else if (currentColumns > columns) {
+    sheet.deleteColumns(columns + 1, currentColumns - columns);
+  }
+}
+
+function copySheetSettings_(sourceSheet, targetSheet) {
+  targetSheet.setFrozenRows(sourceSheet.getFrozenRows());
+  targetSheet.setFrozenColumns(sourceSheet.getFrozenColumns());
+  targetSheet.setHiddenGridlines(sourceSheet.hasHiddenGridlines());
+  targetSheet.setTabColor(sourceSheet.getTabColor());
+}
+
+function copyFilter_(sourceSheet, targetSheet) {
+  const sourceFilter = sourceSheet.getFilter();
+  if (!sourceFilter) {
+    return;
+  }
+
+  const sourceFilterRange = sourceFilter.getRange();
+  const targetFilterRange = targetSheet.getRange(
+    sourceFilterRange.getRow(),
+    sourceFilterRange.getColumn(),
+    sourceFilterRange.getNumRows(),
+    sourceFilterRange.getNumColumns()
+  );
+  const targetFilter = targetFilterRange.createFilter();
+  const firstColumn = sourceFilterRange.getColumn();
+  const lastColumn = firstColumn + sourceFilterRange.getNumColumns() - 1;
+
+  for (let column = firstColumn; column <= lastColumn; column++) {
+    const criteria = sourceFilter.getColumnFilterCriteria(column);
+    if (criteria) {
+      targetFilter.setColumnFilterCriteria(column, criteria);
+    }
+  }
+}
+
+function copyColumnWidths_(sourceSheet, targetSheet, columns) {
+  for (let column = 1; column <= columns; column++) {
+    targetSheet.setColumnWidth(column, sourceSheet.getColumnWidth(column));
+  }
+}
+
+function copyRowHeights_(sourceSheet, targetSheet, rows) {
+  for (let row = 1; row <= rows; row++) {
+    targetSheet.setRowHeight(row, sourceSheet.getRowHeight(row));
+  }
 }
 
 function getValuesOnlyCopyName_(sourceName) {
