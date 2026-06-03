@@ -1,11 +1,16 @@
 function processSheets() {
   const lock = LockService.getScriptLock();
-  let isLockAcquired = false;
+  const isLockAcquired = lock.tryLock(CONFIG.LOCK_TIMEOUT_MS);
+
+  if (!isLockAcquired) {
+    Logger.log(
+      'Пропуск запуска: другой экземпляр скрипта всё ещё выполняется. ' +
+      `Повторите запуск позже или дождитесь следующего триггера. Таймаут ожидания: ${CONFIG.LOCK_TIMEOUT_MS} мс.`
+    );
+    return;
+  }
 
   try {
-    lock.waitLock(CONFIG.LOCK_TIMEOUT_MS);
-    isLockAcquired = true;
-
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     const sheets = spreadsheet.getSheets();
     const properties = PropertiesService.getScriptProperties();
@@ -28,7 +33,7 @@ function processSheets() {
 }
 
 const CONFIG = {
-  LOCK_TIMEOUT_MS: 1000,
+  LOCK_TIMEOUT_MS: 30000,
   TARGET_SHEET_PREFIX: '=',
   PROPERTY_PREFIX: 'lastValue_',
   CHANGE_MARKER_CELL: 'G4',
