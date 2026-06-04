@@ -1,5 +1,5 @@
 const CONFIG = {
-  LOCK_TIMEOUT_MS: 1000,
+  LOCK_TIMEOUT_MS: 30000,
   TARGET_SHEET_PREFIX: '=',
   PROPERTY_PREFIX: 'lastValue_',
   CHANGE_MARKER_CELL: 'G4',
@@ -10,19 +10,49 @@ const CONFIG = {
   MAIN_COLUMN: 6, // F
   MERGE_COLUMNS: [1, 3, 4, 5, 6, 38], // A, C, D, E, F, AL
   COPY_TEMP_PREFIX: '__tmp_values_copy__',
+  PENDING_RUN_PROPERTY: 'processSheetsPendingRun',
+  QUEUED_TRIGGER_HANDLER: 'processSheetsQueuedRetry',
+  QUEUED_TRIGGER_DELAY_MS: 60000,
 };
 
 function processSheets() {
+  runProcessSheets_();
+}
+
+/**
+ * Entry point for a delayed retry created when an edit trigger fires while
+ * another processSheets run is still working.
+ */
+function processSheetsQueuedRetry() {
+  deleteQueuedProcessSheetsTriggers();
+  runProcessSheets_();
+}
+
+/**
+ * Runs sheet processing under a lock.
+ *
+ * If another trigger already holds the lock, this function records that one
+ * more run is needed and schedules a single delayed retry instead of throwing
+ * a lock-timeout error.
+ */
+function runProcessSheets_() {
   const lock = LockService.getScriptLock();
+  const properties = PropertiesService.getScriptProperties();
   let isLockAcquired = false;
 
   try {
-    lock.waitLock(CONFIG.LOCK_TIMEOUT_MS);
-    isLockAcquired = true;
+    isLockAcquired = lock.tryLock(CONFIG.LOCK_TIMEOUT_MS);
+
+    if (!isLockAcquired) {
+      queueProcessSheetsRetry(properties);
+      Logger.log('Пропуск запуска processSheets: другой запуск ещё обрабатывает таблицу. Повтор поставлен в очередь.');
+      return;
+    }
+
+    properties.deleteProperty(CONFIG.PENDING_RUN_PROPERTY);
 
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
     const sheets = spreadsheet.getSheets();
-    const properties = PropertiesService.getScriptProperties();
 
     removeStaleTemporaryCopySheets(spreadsheet);
     removeStaleSheetProperties(properties, sheets);
@@ -37,11 +67,51 @@ function processSheets() {
     Logger.log(`Ошибка при обработке листов: ${error && error.stack ? error.stack : error}`);
   } finally {
     if (isLockAcquired) {
+      if (properties.getProperty(CONFIG.PENDING_RUN_PROPERTY) === '1') {
+        ensureQueuedProcessSheetsTrigger();
+        Logger.log('Во время обработки пришёл ещё один запуск. Дополнительная обработка поставлена в очередь.');
+      }
+
       lock.releaseLock();
     }
   }
 }
 
+/**
+ * Marks that a retry is needed and creates a delayed retry trigger when needed.
+ *
+ * @param {GoogleAppsScript.Properties.Properties} properties Script properties.
+ */
+function queueProcessSheetsRetry(properties) {
+  properties.setProperty(CONFIG.PENDING_RUN_PROPERTY, '1');
+  ensureQueuedProcessSheetsTrigger();
+}
+
+/**
+ * Creates one delayed retry trigger if it does not already exist.
+ */
+function ensureQueuedProcessSheetsTrigger() {
+  const hasQueuedTrigger = ScriptApp.getProjectTriggers()
+    .some(trigger => trigger.getHandlerFunction() === CONFIG.QUEUED_TRIGGER_HANDLER);
+
+  if (hasQueuedTrigger) {
+    return;
+  }
+
+  ScriptApp.newTrigger(CONFIG.QUEUED_TRIGGER_HANDLER)
+    .timeBased()
+    .after(CONFIG.QUEUED_TRIGGER_DELAY_MS)
+    .create();
+}
+
+/**
+ * Deletes queued retry triggers for this script.
+ */
+function deleteQueuedProcessSheetsTriggers() {
+  ScriptApp.getProjectTriggers()
+    .filter(trigger => trigger.getHandlerFunction() === CONFIG.QUEUED_TRIGGER_HANDLER)
+    .forEach(trigger => ScriptApp.deleteTrigger(trigger));
+}
 
 /**
  * Deletes temporary copy sheets that could remain after an interrupted previous run.
