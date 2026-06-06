@@ -348,11 +348,11 @@ function applyNotEmptyFilter(sheet) {
 }
 
 /**
- * Replaces the values-only public copy of a processed sheet.
+ * Updates the values-only public copy of a processed sheet.
  *
- * The old public copy remains in place while the temporary copy is being prepared.
- * After formulas are replaced by their calculated values, the script deletes the old
- * copy and renames the prepared sheet, keeping the visible replacement window short.
+ * The existing public copy is not deleted. A hidden temporary copy is prepared
+ * first, formulas are replaced by values there, and only then the prepared
+ * sheet state is transferred into the target sheet in one short hidden update.
  *
  * @param {GoogleAppsScript.Spreadsheet.Sheet} sourceSheet Processed source sheet.
  * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} spreadsheet Active spreadsheet.
@@ -368,21 +368,203 @@ function replaceValuesOnlyCopy(sourceSheet, spreadsheet) {
   SpreadsheetApp.flush();
 
   const temporarySheet = createPreparedTemporaryCopy(sourceSheet, spreadsheet);
-  const oldCopy = spreadsheet.getSheetByName(copyName);
+  let targetSheet = spreadsheet.getSheetByName(copyName);
 
   temporarySheet.hideSheet();
   freezeFormulasAsValues(temporarySheet);
   SpreadsheetApp.flush();
 
-  if (oldCopy) {
-    spreadsheet.deleteSheet(oldCopy);
+  if (!targetSheet) {
+    targetSheet = spreadsheet.insertSheet(copyName);
   }
 
-  temporarySheet.setName(copyName);
-  temporarySheet.showSheet();
-  spreadsheet.setActiveSheet(sourceSheet);
+  try {
+    updateSheetFromPreparedCopy(temporarySheet, targetSheet, sourceSheet, spreadsheet);
+  } finally {
+    spreadsheet.deleteSheet(temporarySheet);
+    spreadsheet.setActiveSheet(sourceSheet);
+  }
 
-  Logger.log(`Копия листа "${sourceSheet.getName()}" заменена листом "${copyName}" без формул.`);
+  Logger.log(`Копия листа "${sourceSheet.getName()}" обновлена листом "${copyName}" без формул.`);
+}
+
+
+/**
+ * Transfers the prepared temporary sheet into the existing target sheet.
+ *
+ * The target sheet is hidden during the destructive part of the update, so the
+ * user does not see clearing, resizing, copying and filter restoration steps.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} preparedSheet Hidden prepared values-only sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} targetSheet Existing or newly created public copy sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} fallbackActiveSheet Sheet to activate while the target is hidden.
+ * @param {GoogleAppsScript.Spreadsheet.Spreadsheet} spreadsheet Active spreadsheet.
+ */
+function updateSheetFromPreparedCopy(preparedSheet, targetSheet, fallbackActiveSheet, spreadsheet) {
+  const shouldRestoreTargetVisibility = !targetSheet.isSheetHidden();
+
+  spreadsheet.setActiveSheet(fallbackActiveSheet);
+  targetSheet.hideSheet();
+
+  try {
+    clearTargetSheetForSnapshot(targetSheet);
+    resizeSheetLikePreparedCopy(targetSheet, preparedSheet);
+    copyPreparedSheetContents(preparedSheet, targetSheet);
+    copySheetDimensions(preparedSheet, targetSheet);
+    copySheetViewSettings(preparedSheet, targetSheet);
+    restorePreparedSheetFilter(preparedSheet, targetSheet);
+    SpreadsheetApp.flush();
+  } finally {
+    if (shouldRestoreTargetVisibility) {
+      targetSheet.showSheet();
+    }
+  }
+}
+
+/**
+ * Clears previous target state before copying a fresh snapshot.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} targetSheet Target sheet.
+ */
+function clearTargetSheetForSnapshot(targetSheet) {
+  const targetFilter = targetSheet.getFilter();
+
+  if (targetFilter) {
+    targetFilter.remove();
+  }
+
+  targetSheet
+    .getRange(1, 1, targetSheet.getMaxRows(), targetSheet.getMaxColumns())
+    .breakApart();
+  targetSheet.clear();
+}
+
+/**
+ * Makes target row and column counts match the prepared sheet.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} targetSheet Target sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} preparedSheet Prepared sheet.
+ */
+function resizeSheetLikePreparedCopy(targetSheet, preparedSheet) {
+  resizeRows(targetSheet, preparedSheet.getMaxRows());
+  resizeColumns(targetSheet, preparedSheet.getMaxColumns());
+}
+
+/**
+ * Changes the target row count to the requested value.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet Sheet to resize.
+ * @param {number} expectedRows Required row count.
+ */
+function resizeRows(sheet, expectedRows) {
+  const currentRows = sheet.getMaxRows();
+
+  if (currentRows < expectedRows) {
+    sheet.insertRowsAfter(currentRows, expectedRows - currentRows);
+    return;
+  }
+
+  if (currentRows > expectedRows) {
+    sheet.deleteRows(expectedRows + 1, currentRows - expectedRows);
+  }
+}
+
+/**
+ * Changes the target column count to the requested value.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet Sheet to resize.
+ * @param {number} expectedColumns Required column count.
+ */
+function resizeColumns(sheet, expectedColumns) {
+  const currentColumns = sheet.getMaxColumns();
+
+  if (currentColumns < expectedColumns) {
+    sheet.insertColumnsAfter(currentColumns, expectedColumns - currentColumns);
+    return;
+  }
+
+  if (currentColumns > expectedColumns) {
+    sheet.deleteColumns(expectedColumns + 1, currentColumns - expectedColumns);
+  }
+}
+
+/**
+ * Copies values-only cell content, formatting, notes, merged cells and validations.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} preparedSheet Prepared sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} targetSheet Target sheet.
+ */
+function copyPreparedSheetContents(preparedSheet, targetSheet) {
+  preparedSheet
+    .getRange(1, 1, preparedSheet.getMaxRows(), preparedSheet.getMaxColumns())
+    .copyTo(targetSheet.getRange(1, 1));
+}
+
+/**
+ * Copies column widths and row heights from the prepared sheet.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} preparedSheet Prepared sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} targetSheet Target sheet.
+ */
+function copySheetDimensions(preparedSheet, targetSheet) {
+  for (let column = 1; column <= preparedSheet.getMaxColumns(); column += 1) {
+    targetSheet.setColumnWidth(column, preparedSheet.getColumnWidth(column));
+  }
+
+  for (let row = 1; row <= preparedSheet.getMaxRows(); row += 1) {
+    targetSheet.setRowHeight(row, preparedSheet.getRowHeight(row));
+  }
+}
+
+/**
+ * Copies high-level sheet view settings from the prepared sheet.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} preparedSheet Prepared sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} targetSheet Target sheet.
+ */
+function copySheetViewSettings(preparedSheet, targetSheet) {
+  targetSheet.setFrozenRows(preparedSheet.getFrozenRows());
+  targetSheet.setFrozenColumns(preparedSheet.getFrozenColumns());
+  targetSheet.setRightToLeft(preparedSheet.isRightToLeft());
+
+  const tabColor = preparedSheet.getTabColorObject();
+  targetSheet.setTabColorObject(tabColor || null);
+}
+
+/**
+ * Recreates the prepared sheet filter range and criteria on the target sheet.
+ *
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} preparedSheet Prepared sheet.
+ * @param {GoogleAppsScript.Spreadsheet.Sheet} targetSheet Target sheet.
+ */
+function restorePreparedSheetFilter(preparedSheet, targetSheet) {
+  const preparedFilter = preparedSheet.getFilter();
+
+  if (!preparedFilter) {
+    return;
+  }
+
+  const preparedFilterRange = preparedFilter.getRange();
+  const targetFilterRange = targetSheet.getRange(
+    preparedFilterRange.getRow(),
+    preparedFilterRange.getColumn(),
+    preparedFilterRange.getNumRows(),
+    preparedFilterRange.getNumColumns()
+  );
+
+  targetFilterRange.createFilter();
+
+  const targetFilter = targetSheet.getFilter();
+  const filterStartColumn = preparedFilterRange.getColumn();
+  const filterEndColumn = filterStartColumn + preparedFilterRange.getNumColumns() - 1;
+
+  for (let column = filterStartColumn; column <= filterEndColumn; column += 1) {
+    const criteria = preparedFilter.getColumnFilterCriteria(column);
+
+    if (criteria) {
+      targetFilter.setColumnFilterCriteria(column, criteria.copy().build());
+    }
+  }
 }
 
 /**
